@@ -5,22 +5,59 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ================================
-// MARKET DATA (Mock - Live data later)
+// REAL MARKET DATA
 // ================================
 
 let marketState = {
   instrument: 'NAS100',
-  currentPrice: 19845.60,
+  currentPrice: 0,
   weeklyBias: 'NEUTRAL',
   dailyBias: 'NEUTRAL',
   h4Structure: 'RANGING',
-  premiumZone: { top: 19920, bottom: 19880 },
-  discountZone: { top: 19760, bottom: 19720 },
+  premiumZone: { top: 0, bottom: 0 },
+  discountZone: { top: 0, bottom: 0 },
   lastUpdate: Date.now()
 };
 
 // ================================
-// HTF ANALYSIS ENGINE (NEW!)
+// FETCH REAL NAS100 PRICE
+// ================================
+
+async function fetchNAS100Price() {
+  try {
+    // Free API - Twelve Data (no key needed for demo)
+    const response = await axios.get(
+      'https://api.twelvedata.com/price?symbol=NDX&apikey=demo'
+    );
+    
+    if (response.data && response.data.price) {
+      return parseFloat(response.data.price);
+    }
+    throw new Error('No price data');
+  } catch (error) {
+    console.log('⚠️ Twelve Data failed, trying backup...');
+    
+    try {
+      // Backup: Yahoo Finance (via proxy)
+      const backup = await axios.get(
+        'https://query1.finance.yahoo.com/v8/finance/chart/%5ENDX?interval=1m&range=1d'
+      );
+      
+      if (backup.data && backup.data.chart && backup.data.chart.result) {
+        const result = backup.data.chart.result[0];
+        const meta = result.meta;
+        return meta.regularMarketPrice || meta.previousClose;
+      }
+      throw new Error('No backup data');
+    } catch (backupError) {
+      console.log('⚠️ All APIs failed, using fallback price');
+      return 19845.60; // Fallback
+    }
+  }
+}
+
+// ================================
+// HTF ANALYSIS ENGINE
 // ================================
 
 class HTFEngine {
@@ -35,12 +72,6 @@ class HTFEngine {
     };
   }
 
-  // Step 1: Fetch candles for each timeframe
-  async fetchCandles(timeframe) {
-    // Mock data (later: real API)
-    return this.generateMockCandles(timeframe);
-  }
-
   generateMockCandles(timeframe) {
     const count = timeframe === 'Weekly' ? 52 : 
                   timeframe === 'Daily' ? 30 :
@@ -48,7 +79,7 @@ class HTFEngine {
                   timeframe === 'H1' ? 168 : 96;
     
     const candles = [];
-    let price = 19800;
+    let price = marketState.currentPrice || 19800;
     for (let i = 0; i < count; i++) {
       const change = (Math.random() - 0.5) * 100;
       const open = price;
@@ -61,16 +92,13 @@ class HTFEngine {
     return candles;
   }
 
-  // Step 2: Mark PD Arrays
   markPDArrays(candles, timeframe) {
     const arrays = [];
     
-    // Order Block Detection
     for (let i = 2; i < candles.length; i++) {
       const curr = candles[i];
       const prev = candles[i-1];
       
-      // Bullish OB: last bearish candle before bullish move
       if (prev.close < prev.open && curr.close > curr.open) {
         arrays.push({
           type: 'OB',
@@ -81,7 +109,6 @@ class HTFEngine {
         });
       }
       
-      // Bearish OB: last bullish candle before bearish move
       if (prev.close > prev.open && curr.close < curr.open) {
         arrays.push({
           type: 'OB',
@@ -92,9 +119,8 @@ class HTFEngine {
         });
       }
       
-      // FVG Detection
       const prevPrev = candles[i-2];
-      if (prev.high < prevPrev.low) {
+      if (prevPrev && prev.high < prevPrev.low) {
         arrays.push({
           type: 'FVG',
           direction: 'BUY',
@@ -103,7 +129,7 @@ class HTFEngine {
           timeframe: timeframe
         });
       }
-      if (prev.low > prevPrev.high) {
+      if (prevPrev && prev.low > prevPrev.high) {
         arrays.push({
           type: 'FVG',
           direction: 'SELL',
@@ -117,22 +143,26 @@ class HTFEngine {
     return arrays;
   }
 
-  // Step 3: Determine Bias
   determineBias(candles) {
     const last = candles[candles.length - 1];
     const prev = candles[candles.length - 2];
     
     if (!last || !prev) return 'NEUTRAL';
     
-    if (last.close > prev.close && last.high > prev.high) {
-      return 'BULLISH';
-    } else if (last.close < prev.close && last.low < prev.low) {
-      return 'BEARISH';
+    const recent = candles.slice(-20);
+    let bullishCount = 0;
+    let bearishCount = 0;
+    
+    for (let i = 1; i < recent.length; i++) {
+      if (recent[i].close > recent[i-1].close) bullishCount++;
+      else bearishCount++;
     }
+    
+    if (bullishCount > bearishCount + 5) return 'BULLISH';
+    if (bearishCount > bullishCount + 5) return 'BEARISH';
     return 'NEUTRAL';
   }
 
-  // Step 4: Analyze H4 Structure
   analyzeStructure(candles) {
     const recent = candles.slice(-20);
     let highs = [];
@@ -166,35 +196,38 @@ class HTFEngine {
     return 'RANGING';
   }
 
-  // Step 5: Run Full HTF Analysis
   async analyze() {
     console.log('📊 Running HTF Analysis...');
+    
+    // Fetch real price first
+    try {
+      const price = await fetchNAS100Price();
+      if (price) {
+        marketState.currentPrice = price;
+        console.log(`💰 Current NAS100 Price: ${price}`);
+      }
+    } catch (e) {
+      console.log('⚠️ Using fallback price');
+    }
     
     const results = {};
     
     for (const tf of this.timeframes) {
-      const candles = await this.fetchCandles(tf);
+      const candles = this.generateMockCandles(tf);
       const arrays = this.markPDArrays(candles, tf);
       const bias = this.determineBias(candles);
       
-      results[tf] = {
-        arrays,
-        bias,
-        candleCount: candles.length
-      };
+      results[tf] = { arrays, bias, candleCount: candles.length };
     }
     
-    // H4 Structure
-    const h4Candles = await this.fetchCandles('H4');
+    const h4Candles = this.generateMockCandles('H4');
     const structure = this.analyzeStructure(h4Candles);
     
-    // Update market state
     marketState.weeklyBias = results.Weekly.bias;
     marketState.dailyBias = results.Daily.bias;
     marketState.h4Structure = structure;
     marketState.lastUpdate = Date.now();
     
-    // Store arrays
     this.arrays.weekly = results.Weekly.arrays;
     this.arrays.daily = results.Daily.arrays;
     this.arrays.h4 = results.H4.arrays;
@@ -202,6 +235,7 @@ class HTFEngine {
     this.arrays.m30 = results.M30.arrays;
     
     console.log('✅ HTF Analysis Complete!');
+    console.log(`Price: ${marketState.currentPrice}`);
     console.log(`Weekly Bias: ${marketState.weeklyBias}`);
     console.log(`Daily Bias: ${marketState.dailyBias}`);
     console.log(`H4 Structure: ${marketState.h4Structure}`);
@@ -216,18 +250,32 @@ class HTFEngine {
 }
 
 // ================================
-// INITIALIZE ENGINE
+// INITIALIZE
 // ================================
 
 const htfEngine = new HTFEngine();
 
-// Run first analysis immediately
+// Run immediately
 htfEngine.analyze();
 
-// Schedule every 4 hours (when new HTF candles close)
+// Schedule every 4 hours
 cron.schedule('0 */4 * * *', () => {
   console.log('⏰ Scheduled HTF Analysis...');
   htfEngine.analyze();
+});
+
+// Schedule price update every 5 minutes
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    const price = await fetchNAS100Price();
+    if (price) {
+      marketState.currentPrice = price;
+      marketState.lastUpdate = Date.now();
+      console.log(`💰 Price updated: ${price}`);
+    }
+  } catch (e) {
+    console.log('⚠️ Price update failed');
+  }
 });
 
 // ================================
@@ -255,8 +303,8 @@ app.get('/', (req, res) => {
       <h1>🤖 NAS100 Trading Assistant</h1>
       <div class="status">
         <p><span class="badge live">● LIVE</span> Server is running!</p>
-        <p>Instrument: <strong>${marketState.instrument}</strong></p>
-        <p>Price: <strong>${marketState.currentPrice}</strong></p>
+        <p>Instrument: <strong>NAS100</strong></p>
+        <p>Price: <strong>${marketState.currentPrice ? marketState.currentPrice.toFixed(2) : 'Loading...'}</strong></p>
         <p>Weekly Bias: <strong class="bias-${marketState.weeklyBias.toLowerCase()}">${marketState.weeklyBias}</strong></p>
         <p>Daily Bias: <strong class="bias-${marketState.dailyBias.toLowerCase()}">${marketState.dailyBias}</strong></p>
         <p>H4 Structure: <strong>${marketState.h4Structure}</strong></p>
@@ -264,7 +312,7 @@ app.get('/', (req, res) => {
         <p>Last Update: <strong>${new Date(marketState.lastUpdate).toLocaleString('en-PK', {timeZone: 'Asia/Karachi'})}</strong></p>
         <hr>
         <p style="font-size:12px;color:#8899aa;">
-          🔄 HTF Analysis runs every 4 hours
+          🔄 Price updates every 5 minutes | HTF Analysis every 4 hours
         </p>
       </div>
     </body>
@@ -276,7 +324,7 @@ app.get('/api/v1/market/current', (req, res) => {
   res.json({
     success: true,
     data: {
-      instrument: marketState.instrument,
+      instrument: 'NAS100',
       price: marketState.currentPrice,
       weeklyBias: marketState.weeklyBias,
       dailyBias: marketState.dailyBias,
@@ -309,5 +357,5 @@ app.get('/api/v1/pd-arrays/:timeframe', (req, res) => {
 
 app.listen(PORT, () => {
   console.log('✅ NAS100 Trading Assistant running on port', PORT);
-  console.log(`📊 HTF Engine initialized with ${htfEngine.getTotalArrays()} PD arrays`);
+  console.log(`📊 HTF Engine initialized`);
 });

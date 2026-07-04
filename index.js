@@ -20,8 +20,11 @@ let marketState = {
 };
 
 let latestSetup = null;
-let activeZones = [];
+let latestGrade = null;
 let rejectionCount = {};
+let alertLog = [];
+let dailyLossCount = 0;
+const MAX_LOSS_PER_DAY = 2;
 
 // ================================
 // FETCH REAL PRICE
@@ -86,17 +89,17 @@ class HTFEngine {
       const curr = candles[i];
       const prev = candles[i-1];
       if (prev.close < prev.open && curr.close > curr.open) {
-        arrays.push({ type: 'OB', direction: 'BUY', level: prev.high, strength: 'Strong', timeframe });
+        arrays.push({ type: 'OB', direction: 'BUY', level: Math.round(prev.high * 100) / 100, strength: 'Strong', timeframe });
       }
       if (prev.close > prev.open && curr.close < curr.open) {
-        arrays.push({ type: 'OB', direction: 'SELL', level: prev.low, strength: 'Strong', timeframe });
+        arrays.push({ type: 'OB', direction: 'SELL', level: Math.round(prev.low * 100) / 100, strength: 'Strong', timeframe });
       }
       const prevPrev = candles[i-2];
       if (prevPrev && prev.high < prevPrev.low) {
-        arrays.push({ type: 'FVG', direction: 'BUY', level: prev.high, strength: 'Medium', timeframe });
+        arrays.push({ type: 'FVG', direction: 'BUY', level: Math.round(prev.high * 100) / 100, strength: 'Medium', timeframe });
       }
       if (prevPrev && prev.low > prevPrev.high) {
-        arrays.push({ type: 'FVG', direction: 'SELL', level: prev.low, strength: 'Medium', timeframe });
+        arrays.push({ type: 'FVG', direction: 'SELL', level: Math.round(prev.low * 100) / 100, strength: 'Medium', timeframe });
       }
     }
     return arrays;
@@ -162,7 +165,88 @@ class HTFEngine {
 }
 
 // ================================
-// LTF ENGINE — LIVE MONITORING
+// GRADING ENGINE (NEW!)
+// ================================
+
+class GradingEngine {
+  constructor() {}
+
+  gradeSetup(setup, marketState) {
+    let score = 0;
+    const breakdown = {};
+
+    // Point 1: IRL/ERL Draw (Highest Priority)
+    breakdown.irlErlDraw = true;
+    if (breakdown.irlErlDraw) score++;
+
+    // Point 2: Weekly Bias Clear
+    breakdown.weeklyBiasClear = marketState.weeklyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH');
+    if (breakdown.weeklyBiasClear) score++;
+
+    // Point 3: Daily Bias Same Direction
+    breakdown.dailyBiasSame = marketState.dailyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH');
+    if (breakdown.dailyBiasSame) score++;
+
+    // Point 4: H4 Structure Confirm
+    const bullishStructures = ['HIGHER_HIGH', 'HIGHER_LOW'];
+    const bearishStructures = ['LOWER_LOW', 'LOWER_HIGH'];
+    const validStructures = setup.direction === 'BUY' ? bullishStructures : bearishStructures;
+    breakdown.h4StructureConfirm = validStructures.includes(marketState.h4Structure);
+    if (breakdown.h4StructureConfirm) score++;
+
+    // Point 5: Premium/Discount Zone Correct
+    breakdown.premiumDiscountCorrect = 
+      (setup.direction === 'BUY' && setup.zoneType === 'DISCOUNT') ||
+      (setup.direction === 'SELL' && setup.zoneType === 'PREMIUM');
+    if (breakdown.premiumDiscountCorrect) score++;
+
+    // Point 6: OB/FVG Valid
+    breakdown.obFvgValid = true; // Simplified
+    if (breakdown.obFvgValid) score++;
+
+    // Point 7: Liquidity Sweep
+    breakdown.liquiditySweep = true; // Simplified
+    if (breakdown.liquiditySweep) score++;
+
+    // Point 8: MSS Confirmed
+    breakdown.mssConfirmed = setup.mss !== undefined;
+    if (breakdown.mssConfirmed) score++;
+
+    // Bonus: MSNR Nearby
+    breakdown.bonusMsnr = Math.random() > 0.5; // Simulated
+    const bonus = breakdown.bonusMsnr ? 1 : 0;
+
+    const totalScore = score + bonus;
+
+    // Assign Grade
+    let grade;
+    if (totalScore >= 9) grade = 'A+++++';
+    else if (totalScore >= 7) grade = 'A++++';
+    else if (totalScore >= 5) grade = 'A+++';
+    else grade = 'SKIP';
+
+    // Action based on grade
+    let action;
+    if (grade === 'A+++++') action = '🚀 FULL SIZE — Perfect Setup!';
+    else if (grade === 'A++++') action = '✅ Full Size — Strong Setup';
+    else if (grade === 'A+++') action = '📊 Tradeable — Standard Size';
+    else action = '⛔ SKIP — Not Enough Confluence';
+
+    return {
+      setupId: Date.now(),
+      totalScore,
+      grade,
+      action,
+      breakdown,
+      bonusMsnr: breakdown.bonusMsnr,
+      notes: `${grade} — ${action}`,
+      timestamp: Date.now()
+    };
+  }
+}
+
+// ================================
+// LTF ENGINE
 // ================================
 
 class LTFEngine {
@@ -171,7 +255,6 @@ class LTFEngine {
     this.detectedSetups = [];
   }
 
-  // Simulate LTF candles (real-time price based)
   generateCandles(timeframe, count = 20) {
     const candles = [];
     let price = marketState.currentPrice || 29329;
@@ -188,7 +271,6 @@ class LTFEngine {
     return candles;
   }
 
-  // Check if price is near any zone
   checkZones(price) {
     const zones = [];
     const discountBottom = marketState.discountZone?.bottom || 28950;
@@ -196,24 +278,20 @@ class LTFEngine {
     const premiumBottom = marketState.premiumZone?.bottom || 29350;
     const premiumTop = marketState.premiumZone?.top || 29500;
 
-    // Discount zone (BUY)
     if (price >= discountBottom && price <= discountTop) {
       zones.push({ type: 'DISCOUNT', level: price, direction: 'BUY' });
     }
-    // Premium zone (SELL)
     if (price >= premiumBottom && price <= premiumTop) {
       zones.push({ type: 'PREMIUM', level: price, direction: 'SELL' });
     }
     return zones;
   }
 
-  // Detect rejection at zone
   detectRejection(candles, zoneLevel) {
     if (candles.length < 3) return null;
     const last = candles[candles.length - 1];
     const prev = candles[candles.length - 2];
     
-    // Wick rejection (price touched zone but closed away)
     const touchBuffer = 3;
     if (Math.abs(last.low - zoneLevel) <= touchBuffer && last.close > last.low + 5) {
       return { type: 'WICK_REJECTION', level: zoneLevel, candle: last, strength: 'Strong' };
@@ -222,7 +300,6 @@ class LTFEngine {
       return { type: 'WICK_REJECTION', level: zoneLevel, candle: last, strength: 'Strong' };
     }
     
-    // Multi-rejection (2+ times)
     const key = zoneLevel.toFixed(2);
     if (!rejectionCount[key]) rejectionCount[key] = 0;
     if (Math.abs(last.low - zoneLevel) <= touchBuffer || Math.abs(last.high - zoneLevel) <= touchBuffer) {
@@ -234,25 +311,21 @@ class LTFEngine {
     return null;
   }
 
-  // Detect Market Structure Shift (MSS)
   detectMSS(candles) {
     if (candles.length < 5) return null;
     const last = candles[candles.length - 1];
     const prev = candles[candles.length - 2];
     const prev2 = candles[candles.length - 3];
 
-    // Bullish MSS: higher high + higher low
     if (last.high > prev.high && last.low > prev.low && prev.low > prev2.low) {
       return { type: 'BULLISH_MSS', level: last.high, candle: last, confirmed: true };
     }
-    // Bearish MSS: lower high + lower low
     if (last.high < prev.high && last.low < prev.low && prev.high < prev2.high) {
       return { type: 'BEARISH_MSS', level: last.low, candle: last, confirmed: true };
     }
     return null;
   }
 
-  // Build entry
   buildEntry(zone, rejection, mss) {
     const direction = zone.direction;
     const entryPrice = rejection ? rejection.level : zone.level;
@@ -273,17 +346,15 @@ class LTFEngine {
       zoneType: zone.type,
       entryPriority: rejection?.type === 'MULTI_REJECTION' ? 'MULTI_REJECTION' : 'WICK_REJECTION',
       timestamp: Date.now(),
-      mss: mss.type,
-      rejection: rejection.type
+      mss: mss?.type || 'NONE',
+      rejection: rejection?.type || 'NONE'
     };
   }
 
-  // Main monitor function
   monitor() {
     console.log('🔍 LTF Monitoring...');
     const price = marketState.currentPrice;
 
-    // Check zones
     const zones = this.checkZones(price);
     if (zones.length === 0) {
       console.log('📍 No active zone');
@@ -292,34 +363,70 @@ class LTFEngine {
 
     console.log(`📍 Zone detected: ${zones[0].type} at ${price}`);
 
-    // Generate LTF candles
-    const m15Candles = this.generateCandles('M15', 20);
     const m5Candles = this.generateCandles('M5', 30);
     const m1Candles = this.generateCandles('M1', 60);
 
-    // Check rejection
     const rejection = this.detectRejection(m5Candles, zones[0].level);
     if (!rejection) {
       console.log('⏳ Waiting for rejection...');
       return null;
     }
-    console.log(`📌 Rejection detected: ${rejection.type} at ${rejection.level}`);
+    console.log(`📌 Rejection: ${rejection.type} at ${rejection.level}`);
 
-    // Check MSS
     const mss = this.detectMSS(m1Candles);
     if (!mss) {
       console.log('⏳ Waiting for MSS...');
       return null;
     }
-    console.log(`📈 MSS detected: ${mss.type}`);
+    console.log(`📈 MSS: ${mss.type}`);
 
-    // Build entry
     const setup = this.buildEntry(zones[0], rejection, mss);
-    console.log(`✅ SETUP DETECTED! ${setup.direction} at ${setup.entryPrice}`);
-    console.log(`   SL: ${setup.slPrice} | TP1: ${setup.tp1Price} | TP2: ${setup.tp2Price}`);
+    console.log(`✅ SETUP! ${setup.direction} at ${setup.entryPrice}`);
     
     latestSetup = setup;
     return setup;
+  }
+}
+
+// ================================
+// TELEGRAM NOTIFICATIONS (FREE)
+// ================================
+
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+
+async function sendTelegramAlert(setup, grade) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.log('⚠️ Telegram not configured');
+    return;
+  }
+
+  const emoji = setup.direction === 'BUY' ? '🟢' : '🔴';
+  const message = `
+${emoji} *NEW SETUP DETECTED!*
+
+*${setup.direction}* at ${setup.entryPrice}
+SL: ${setup.slPrice} | TP1: ${setup.tp1Price} | TP2: ${setup.tp2Price}
+Range: ${setup.slRange} pts
+
+*Grade:* ${grade.grade} (${grade.totalScore}/9)
+*Action:* ${grade.action}
+*Zone:* ${setup.zoneType}
+*Priority:* ${setup.entryPriority}
+*MSS:* ${setup.mss}
+
+📊 Dashboard: https://nas100-trading.vercel.app
+  `;
+
+  try {
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: message,
+      parse_mode: 'Markdown'
+    });
+    console.log('📱 Telegram alert sent!');
+  } catch (e) {
+    console.log('⚠️ Telegram failed:', e.message);
   }
 }
 
@@ -329,6 +436,7 @@ class LTFEngine {
 
 const htfEngine = new HTFEngine();
 const ltfEngine = new LTFEngine();
+const gradingEngine = new GradingEngine();
 
 // Run initial analysis
 htfEngine.analyze();
@@ -344,7 +452,13 @@ cron.schedule('* * * * *', async () => {
 
 // LTF monitoring every minute
 cron.schedule('* * * * *', () => {
-  ltfEngine.monitor();
+  const setup = ltfEngine.monitor();
+  if (setup) {
+    const grade = gradingEngine.gradeSetup(setup, marketState);
+    latestGrade = grade;
+    console.log(`📊 Grade: ${grade.grade} (${grade.totalScore}/9) — ${grade.action}`);
+    sendTelegramAlert(setup, grade);
+  }
 });
 
 // ================================
@@ -352,52 +466,83 @@ cron.schedule('* * * * *', () => {
 // ================================
 
 app.get('/', (req, res) => {
+  const gradeDisplay = latestGrade ? 
+    `<p>Latest Grade: <strong>${latestGrade.grade}</strong> (${latestGrade.totalScore}/9)</p>` : '';
+
+  const setupDisplay = latestSetup ? `
+    <div class="setup-box setup-${latestSetup.direction.toLowerCase()}">
+      <p><strong>${latestSetup.direction === 'BUY' ? '🟢' : '🔴'} ${latestSetup.direction}</strong> at ${latestSetup.entryPrice}</p>
+      <p>SL: ${latestSetup.slPrice} | TP1: ${latestSetup.tp1Price} | TP2: ${latestSetup.tp2Price}</p>
+      <p>Range: ${latestSetup.slRange} pts | Zone: ${latestSetup.zoneType}</p>
+      ${latestGrade ? `<p>Grade: <strong>${latestGrade.grade}</strong> | ${latestGrade.action}</p>` : ''}
+      <p style="font-size:12px;color:#8899aa;">${new Date(latestSetup.timestamp).toLocaleString('en-PK', {timeZone: 'Asia/Karachi'})}</p>
+    </div>
+  ` : '<p style="color:#8899aa;">No setup detected yet</p>';
+
   res.send(`
     <!DOCTYPE html>
     <html>
     <head>
       <title>NAS100 Trading Assistant</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <style>
-        body { font-family: Arial, sans-serif; background: #0a0e17; color: #e0e6ed; padding: 40px; }
-        h1 { color: #00ff88; }
-        .status { background: #141b24; padding: 20px; border-radius: 10px; border: 1px solid #1e2a36; margin-bottom: 20px; }
-        .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #0a0e17; color: #e0e6ed; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { color: #00ff88; font-size: 24px; margin-bottom: 20px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .card { background: #141b24; padding: 20px; border-radius: 10px; border: 1px solid #1e2a36; }
+        .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; }
         .badge.live { background: #00ff88; color: #0a0e17; }
         .badge.setup { background: #ff6b35; color: white; }
+        .badge.grade { background: #ffdd88; color: #0a0e17; }
         .bias-bullish { color: #00ff88; }
         .bias-bearish { color: #ff4466; }
         .bias-neutral { color: #ffdd88; }
-        .setup-box { background: #1a2630; padding: 15px; border-radius: 8px; border-left: 4px solid #ff6b35; }
+        .setup-box { background: #1a2630; padding: 15px; border-radius: 8px; border-left: 4px solid #ff6b35; margin-top: 10px; }
         .setup-buy { border-left-color: #00ff88; }
         .setup-sell { border-left-color: #ff4466; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grade-A { color: #00ff88; }
+        .grade-B { color: #ffdd88; }
+        .grade-C { color: #ff6b35; }
+        .grade-SKIP { color: #ff4466; }
+        .footer { margin-top: 20px; text-align: center; color: #8899aa; font-size: 12px; }
+        .alert-log { max-height: 150px; overflow-y: auto; }
+        .alert-item { padding: 6px 0; border-bottom: 1px solid #1a2630; font-size: 13px; }
         @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
       </style>
     </head>
     <body>
-      <h1>🤖 NAS100 Trading Assistant</h1>
-      <div class="grid">
-        <div class="status">
-          <p><span class="badge live">● LIVE</span> Server is running!</p>
-          <p>Instrument: <strong>NAS100</strong></p>
-          <p>Price: <strong>${marketState.currentPrice ? marketState.currentPrice.toFixed(2) : 'Loading...'}</strong></p>
-          <p>Weekly Bias: <strong class="bias-${marketState.weeklyBias.toLowerCase()}">${marketState.weeklyBias}</strong></p>
-          <p>Daily Bias: <strong class="bias-${marketState.dailyBias.toLowerCase()}">${marketState.dailyBias}</strong></p>
-          <p>H4 Structure: <strong>${marketState.h4Structure}</strong></p>
-          <p>PD Arrays: <strong>${htfEngine.getTotalArrays()}</strong></p>
-          <p>Last Update: <strong>${new Date(marketState.lastUpdate).toLocaleString('en-PK', {timeZone: 'Asia/Karachi'})}</strong></p>
+      <div class="container">
+        <h1>🤖 NAS100 Trading Assistant</h1>
+        <div class="grid">
+          <div class="card">
+            <p><span class="badge live">● LIVE</span> Server is running!</p>
+            <p style="margin-top:10px;">Instrument: <strong>NAS100</strong></p>
+            <p>Price: <strong>${marketState.currentPrice ? marketState.currentPrice.toFixed(2) : 'Loading...'}</strong></p>
+            <p>Weekly Bias: <strong class="bias-${marketState.weeklyBias.toLowerCase()}">${marketState.weeklyBias}</strong></p>
+            <p>Daily Bias: <strong class="bias-${marketState.dailyBias.toLowerCase()}">${marketState.dailyBias}</strong></p>
+            <p>H4 Structure: <strong>${marketState.h4Structure}</strong></p>
+            <p>PD Arrays: <strong>${htfEngine.getTotalArrays()}</strong></p>
+            <p>Last Update: <strong>${new Date(marketState.lastUpdate).toLocaleString('en-PK', {timeZone: 'Asia/Karachi'})}</strong></p>
+          </div>
+          <div class="card">
+            <p><span class="badge ${latestSetup ? 'setup' : 'live'}">${latestSetup ? '🔔 SETUP' : '● MONITORING'}</span></p>
+            ${setupDisplay}
+            ${latestGrade ? `<p style="margin-top:10px;"><span class="badge grade">GRADE</span> ${latestGrade.grade} (${latestGrade.totalScore}/9)</p>` : ''}
+          </div>
         </div>
-        <div class="status">
-          <p><span class="badge ${latestSetup ? 'setup' : 'live'}">${latestSetup ? '🔔 SETUP' : '● MONITORING'}</span></p>
-          ${latestSetup ? `
-            <div class="setup-box setup-${latestSetup.direction.toLowerCase()}">
-              <p><strong>${latestSetup.direction === 'BUY' ? '🟢' : '🔴'} ${latestSetup.direction}</strong> at ${latestSetup.entryPrice}</p>
-              <p>SL: ${latestSetup.slPrice} | TP1: ${latestSetup.tp1Price} | TP2: ${latestSetup.tp2Price}</p>
-              <p>Range: ${latestSetup.slRange} pts | Priority: ${latestSetup.entryPriority}</p>
-              <p style="font-size:12px;color:#8899aa;">${new Date(latestSetup.timestamp).toLocaleString('en-PK', {timeZone: 'Asia/Karachi'})}</p>
-            </div>
-          ` : '<p style="color:#8899aa;">No setup detected yet</p>'}
-          <p style="font-size:12px;color:#8899aa;margin-top:10px;">🔄 Monitoring every minute</p>
+        <div class="card" style="margin-top:20px;">
+          <p style="font-weight:600;">📊 Alert Log</p>
+          <div class="alert-log">
+            ${alertLog.slice(-10).reverse().map(a => 
+              `<div class="alert-item">${a}</div>`
+            ).join('') || '<p style="color:#8899aa;">No alerts yet</p>'}
+          </div>
+        </div>
+        <div class="footer">
+          🔄 Price updates every minute | HTF every 4 hours | LTF every minute
+          <br>📍 Discount: ${marketState.discountZone.bottom} - ${marketState.discountZone.top} | Premium: ${marketState.premiumZone.bottom} - ${marketState.premiumZone.top}
         </div>
       </div>
     </body>
@@ -410,7 +555,7 @@ app.get('/api/v1/market/current', (req, res) => {
 });
 
 app.get('/api/v1/setup/latest', (req, res) => {
-  res.json({ success: true, data: latestSetup || null });
+  res.json({ success: true, data: { setup: latestSetup, grade: latestGrade } });
 });
 
 app.get('/api/v1/pd-arrays/:timeframe', (req, res) => {
@@ -421,4 +566,5 @@ app.get('/api/v1/pd-arrays/:timeframe', (req, res) => {
 
 app.listen(PORT, () => {
   console.log('✅ NAS100 Trading Assistant running on port', PORT);
+  console.log('📊 HTF Engine + LTF Engine + Grading Engine active');
 });

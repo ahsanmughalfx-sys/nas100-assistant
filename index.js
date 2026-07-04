@@ -568,3 +568,28 @@ app.listen(PORT, () => {
   console.log('✅ NAS100 Trading Assistant running on port', PORT);
   console.log('📊 HTF Engine + LTF Engine + Grading Engine active');
 });
+// Global FCM tokens store
+global.fcmTokens = [];
+// Register FCM Token Endpoint
+app.post('/api/v1/register-token', express.json(), (req, res) => {
+  const { token } = req.body;
+  if (!token) {
+    return res.status(400).json({ success: false, error: 'Token required' });
+  }
+  
+  if (!global.fcmTokens) global.fcmTokens = [];
+  if (!global.fcmTokens.includes(token)) {
+    global.fcmTokens.push(token);
+    console.log('📱 New FCM token registered:', token);
+  }
+  
+  res.json({ 
+    success: true, 
+    message: 'Token registered successfully',
+    count: global.fcmTokens.length 
+  });
+});
+git add index.js
+git commit -m "Added register-token endpoint"
+git push origin main
+

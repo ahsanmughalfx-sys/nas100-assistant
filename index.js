@@ -1,8 +1,29 @@
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
+const admin = require('firebase-admin');
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ================================
+// FIREBASE ADMIN INIT
+// ================================
+
+try {
+  const serviceAccount = require('./firebase-key.json');
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  console.log('✅ Firebase Admin initialized');
+} catch (e) {
+  console.log('⚠️ Firebase key not found');
+}
+
+global.fcmTokens = [];
+
+// ================================
+// MARKET STATE
+// ================================
 
 let marketState = {
   instrument: 'NAS100',
@@ -19,7 +40,10 @@ let latestSetup = null;
 let latestGrade = null;
 let rejectionCount = {};
 let alertLog = [];
-global.fcmTokens = [];
+
+// ================================
+// FETCH REAL PRICE
+// ================================
 
 async function fetchNAS100Price() {
   try {
@@ -37,11 +61,16 @@ async function fetchNAS100Price() {
   }
 }
 
+// ================================
+// HTF ENGINE
+// ================================
+
 class HTFEngine {
   constructor() {
     this.timeframes = ['Weekly', 'Daily', 'H4', 'H1', 'M30'];
     this.arrays = { weekly: [], daily: [], h4: [], h1: [], m30: [] };
   }
+
   generateMockCandles(timeframe) {
     const count = timeframe === 'Weekly' ? 52 : timeframe === 'Daily' ? 30 : timeframe === 'H4' ? 168 : timeframe === 'H1' ? 168 : 96;
     const candles = [];
@@ -57,18 +86,19 @@ class HTFEngine {
     }
     return candles;
   }
+
   markPDArrays(candles, timeframe) {
     const arrays = [];
     for (let i = 2; i < candles.length; i++) {
       const curr = candles[i];
-      const prev = candles[i-1];
+      const prev = candles[i - 1];
       if (prev.close < prev.open && curr.close > curr.open) {
         arrays.push({ type: 'OB', direction: 'BUY', level: Math.round(prev.high * 100) / 100, strength: 'Strong', timeframe });
       }
       if (prev.close > prev.open && curr.close < curr.open) {
         arrays.push({ type: 'OB', direction: 'SELL', level: Math.round(prev.low * 100) / 100, strength: 'Strong', timeframe });
       }
-      const prevPrev = candles[i-2];
+      const prevPrev = candles[i - 2];
       if (prevPrev && prev.high < prevPrev.low) {
         arrays.push({ type: 'FVG', direction: 'BUY', level: Math.round(prev.high * 100) / 100, strength: 'Medium', timeframe });
       }
@@ -78,37 +108,46 @@ class HTFEngine {
     }
     return arrays;
   }
+
   determineBias(candles) {
     const recent = candles.slice(-20);
-    let b = 0, s = 0;
+    let b = 0,
+      s = 0;
     for (let i = 1; i < recent.length; i++) {
-      if (recent[i].close > recent[i-1].close) b++;
+      if (recent[i].close > recent[i - 1].close) b++;
       else s++;
     }
     if (b > s + 5) return 'BULLISH';
     if (s > b + 5) return 'BEARISH';
     return 'NEUTRAL';
   }
+
   analyzeStructure(candles) {
     const recent = candles.slice(-20);
-    let highs = [], lows = [];
+    let highs = [],
+      lows = [];
     for (let i = 2; i < recent.length; i++) {
-      const prev = recent[i-1], curr = recent[i], next = recent[i+1] || curr;
+      const prev = recent[i - 1],
+        curr = recent[i],
+        next = recent[i + 1] || curr;
       if (curr.high > prev.high && curr.high > next.high) highs.push(curr.high);
       if (curr.low < prev.low && curr.low < next.low) lows.push(curr.low);
     }
     if (highs.length < 2 || lows.length < 2) return 'RANGING';
-    const lh = highs[highs.length-1], ph = highs[highs.length-2];
-    const ll = lows[lows.length-1], pl = lows[lows.length-2];
+    const lh = highs[highs.length - 1],
+      ph = highs[highs.length - 2];
+    const ll = lows[lows.length - 1],
+      pl = lows[lows.length - 2];
     if (lh > ph && ll > pl) return 'HIGHER_HIGH';
     if (lh > ph && ll < pl) return 'HIGHER_LOW';
     if (lh < ph && ll < pl) return 'LOWER_LOW';
     if (lh < ph && ll > pl) return 'LOWER_HIGH';
     return 'RANGING';
   }
+
   async analyze() {
     console.log('📊 HTF Analysis...');
-    try { const p = await fetchNAS100Price(); if (p) marketState.currentPrice = p; } catch(e) {}
+    try { const p = await fetchNAS100Price(); if (p) marketState.currentPrice = p; } catch (e) {}
     const results = {};
     for (const tf of this.timeframes) {
       const candles = this.generateMockCandles(tf);
@@ -129,26 +168,39 @@ class HTFEngine {
     console.log(`✅ Price: ${marketState.currentPrice}, Bias: ${marketState.weeklyBias}, Arrays: ${this.getTotalArrays()}`);
     return results;
   }
+
   getTotalArrays() {
     return Object.values(this.arrays).reduce((s, a) => s + a.length, 0);
   }
 }
 
+// ================================
+// GRADING ENGINE
+// ================================
+
 class GradingEngine {
   gradeSetup(setup, marketState) {
     let score = 0;
     const breakdown = {};
-    breakdown.irlErlDraw = true; if (breakdown.irlErlDraw) score++;
-    breakdown.weeklyBiasClear = marketState.weeklyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH'); if (breakdown.weeklyBiasClear) score++;
-    breakdown.dailyBiasSame = marketState.dailyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH'); if (breakdown.dailyBiasSame) score++;
+    breakdown.irlErlDraw = true;
+    if (breakdown.irlErlDraw) score++;
+    breakdown.weeklyBiasClear = marketState.weeklyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH');
+    if (breakdown.weeklyBiasClear) score++;
+    breakdown.dailyBiasSame = marketState.dailyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH');
+    if (breakdown.dailyBiasSame) score++;
     const bullishStructures = ['HIGHER_HIGH', 'HIGHER_LOW'];
     const bearishStructures = ['LOWER_LOW', 'LOWER_HIGH'];
     const validStructures = setup.direction === 'BUY' ? bullishStructures : bearishStructures;
-    breakdown.h4StructureConfirm = validStructures.includes(marketState.h4Structure); if (breakdown.h4StructureConfirm) score++;
-    breakdown.premiumDiscountCorrect = (setup.direction === 'BUY' && setup.zoneType === 'DISCOUNT') || (setup.direction === 'SELL' && setup.zoneType === 'PREMIUM'); if (breakdown.premiumDiscountCorrect) score++;
-    breakdown.obFvgValid = true; if (breakdown.obFvgValid) score++;
-    breakdown.liquiditySweep = true; if (breakdown.liquiditySweep) score++;
-    breakdown.mssConfirmed = setup.mss !== undefined && setup.mss !== 'NONE'; if (breakdown.mssConfirmed) score++;
+    breakdown.h4StructureConfirm = validStructures.includes(marketState.h4Structure);
+    if (breakdown.h4StructureConfirm) score++;
+    breakdown.premiumDiscountCorrect = (setup.direction === 'BUY' && setup.zoneType === 'DISCOUNT') || (setup.direction === 'SELL' && setup.zoneType === 'PREMIUM');
+    if (breakdown.premiumDiscountCorrect) score++;
+    breakdown.obFvgValid = true;
+    if (breakdown.obFvgValid) score++;
+    breakdown.liquiditySweep = true;
+    if (breakdown.liquiditySweep) score++;
+    breakdown.mssConfirmed = setup.mss !== undefined && setup.mss !== 'NONE';
+    if (breakdown.mssConfirmed) score++;
     breakdown.bonusMsnr = Math.random() > 0.5;
     const bonus = breakdown.bonusMsnr ? 1 : 0;
     const totalScore = score + bonus;
@@ -166,6 +218,10 @@ class GradingEngine {
   }
 }
 
+// ================================
+// LTF ENGINE
+// ================================
+
 class LTFEngine {
   generateCandles(timeframe, count = 20) {
     const candles = [];
@@ -181,6 +237,7 @@ class LTFEngine {
     }
     return candles;
   }
+
   checkZones(price) {
     const zones = [];
     const discountBottom = marketState.discountZone?.bottom || 28950;
@@ -191,6 +248,7 @@ class LTFEngine {
     if (price >= premiumBottom && price <= premiumTop) zones.push({ type: 'PREMIUM', level: price, direction: 'SELL' });
     return zones;
   }
+
   detectRejection(candles, zoneLevel) {
     if (candles.length < 3) return null;
     const last = candles[candles.length - 1];
@@ -211,6 +269,7 @@ class LTFEngine {
     }
     return null;
   }
+
   detectMSS(candles) {
     if (candles.length < 5) return null;
     const last = candles[candles.length - 1];
@@ -224,6 +283,7 @@ class LTFEngine {
     }
     return null;
   }
+
   buildEntry(zone, rejection, mss) {
     const direction = zone.direction;
     const entryPrice = rejection ? rejection.level : zone.level;
@@ -247,6 +307,7 @@ class LTFEngine {
       rejection: rejection?.type || 'NONE'
     };
   }
+
   monitor() {
     console.log('🔍 LTF Monitoring...');
     const price = marketState.currentPrice;
@@ -268,15 +329,60 @@ class LTFEngine {
   }
 }
 
+// ================================
+// SEND PUSH NOTIFICATION TO PHONE
+// ================================
+
+async function sendPushNotification(setup, grade) {
+  if (!admin.apps || admin.apps.length === 0) {
+    console.log('⚠️ Firebase not initialized');
+    return;
+  }
+  if (!global.fcmTokens || global.fcmTokens.length === 0) {
+    console.log('📱 No FCM tokens registered');
+    return;
+  }
+  const message = {
+    notification: {
+      title: `🔔 ${setup.direction} Setup Detected!`,
+      body: `${setup.direction} at ${setup.entryPrice} | Grade: ${grade.grade}`,
+    },
+    data: {
+      direction: setup.direction,
+      entryPrice: setup.entryPrice.toString(),
+      slPrice: setup.slPrice.toString(),
+      tp1Price: setup.tp1Price.toString(),
+      tp2Price: setup.tp2Price.toString(),
+      grade: grade.grade,
+      url: 'https://nas100-trading.vercel.app'
+    }
+  };
+  for (const token of global.fcmTokens) {
+    try {
+      await admin.messaging().send({ ...message, token });
+      console.log('📱 Push notification sent to phone!');
+    } catch (err) {
+      console.log('❌ Failed to send:', err.message);
+    }
+  }
+}
+
+// ================================
+// INITIALIZE ENGINES
+// ================================
+
 const htfEngine = new HTFEngine();
 const ltfEngine = new LTFEngine();
 const gradingEngine = new GradingEngine();
+
 htfEngine.analyze();
+
 cron.schedule('0 */4 * * *', () => htfEngine.analyze());
 cron.schedule('* * * * *', async () => {
-  try { const p = await fetchNAS100Price(); if (p) marketState.currentPrice = p; } catch(e) {}
+  try { const p = await fetchNAS100Price(); if (p) marketState.currentPrice = p; } catch (e) {}
   marketState.lastUpdate = Date.now();
 });
+
 cron.schedule('* * * * *', () => {
   const setup = ltfEngine.monitor();
   if (setup) {
@@ -285,8 +391,13 @@ cron.schedule('* * * * *', () => {
     const alert = `📊 ${setup.direction} | ${setup.entryPrice} | Grade: ${grade.grade} (${grade.totalScore}/9)`;
     alertLog.push(`${new Date().toLocaleString('en-PK', {timeZone: 'Asia/Karachi'})} — ${alert}`);
     console.log(`📊 ${alert}`);
+    sendPushNotification(setup, grade);
   }
 });
+
+// ================================
+// API ENDPOINTS
+// ================================
 
 app.get('/', (req, res) => {
   const setupDisplay = latestSetup ? `

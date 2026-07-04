@@ -23,8 +23,9 @@ let latestSetup = null;
 let latestGrade = null;
 let rejectionCount = {};
 let alertLog = [];
-let dailyLossCount = 0;
-const MAX_LOSS_PER_DAY = 2;
+
+// Global FCM tokens store
+global.fcmTokens = [];
 
 // ================================
 // FETCH REAL PRICE
@@ -165,7 +166,7 @@ class HTFEngine {
 }
 
 // ================================
-// GRADING ENGINE (NEW!)
+// GRADING ENGINE
 // ================================
 
 class GradingEngine {
@@ -175,57 +176,46 @@ class GradingEngine {
     let score = 0;
     const breakdown = {};
 
-    // Point 1: IRL/ERL Draw (Highest Priority)
     breakdown.irlErlDraw = true;
     if (breakdown.irlErlDraw) score++;
 
-    // Point 2: Weekly Bias Clear
     breakdown.weeklyBiasClear = marketState.weeklyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH');
     if (breakdown.weeklyBiasClear) score++;
 
-    // Point 3: Daily Bias Same Direction
     breakdown.dailyBiasSame = marketState.dailyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH');
     if (breakdown.dailyBiasSame) score++;
 
-    // Point 4: H4 Structure Confirm
     const bullishStructures = ['HIGHER_HIGH', 'HIGHER_LOW'];
     const bearishStructures = ['LOWER_LOW', 'LOWER_HIGH'];
     const validStructures = setup.direction === 'BUY' ? bullishStructures : bearishStructures;
     breakdown.h4StructureConfirm = validStructures.includes(marketState.h4Structure);
     if (breakdown.h4StructureConfirm) score++;
 
-    // Point 5: Premium/Discount Zone Correct
     breakdown.premiumDiscountCorrect = 
       (setup.direction === 'BUY' && setup.zoneType === 'DISCOUNT') ||
       (setup.direction === 'SELL' && setup.zoneType === 'PREMIUM');
     if (breakdown.premiumDiscountCorrect) score++;
 
-    // Point 6: OB/FVG Valid
-    breakdown.obFvgValid = true; // Simplified
+    breakdown.obFvgValid = true;
     if (breakdown.obFvgValid) score++;
 
-    // Point 7: Liquidity Sweep
-    breakdown.liquiditySweep = true; // Simplified
+    breakdown.liquiditySweep = true;
     if (breakdown.liquiditySweep) score++;
 
-    // Point 8: MSS Confirmed
-    breakdown.mssConfirmed = setup.mss !== undefined;
+    breakdown.mssConfirmed = setup.mss !== undefined && setup.mss !== 'NONE';
     if (breakdown.mssConfirmed) score++;
 
-    // Bonus: MSNR Nearby
-    breakdown.bonusMsnr = Math.random() > 0.5; // Simulated
+    breakdown.bonusMsnr = Math.random() > 0.5;
     const bonus = breakdown.bonusMsnr ? 1 : 0;
 
     const totalScore = score + bonus;
 
-    // Assign Grade
     let grade;
     if (totalScore >= 9) grade = 'A+++++';
     else if (totalScore >= 7) grade = 'A++++';
     else if (totalScore >= 5) grade = 'A+++';
     else grade = 'SKIP';
 
-    // Action based on grade
     let action;
     if (grade === 'A+++++') action = '🚀 FULL SIZE — Perfect Setup!';
     else if (grade === 'A++++') action = '✅ Full Size — Strong Setup';
@@ -258,7 +248,6 @@ class LTFEngine {
   generateCandles(timeframe, count = 20) {
     const candles = [];
     let price = marketState.currentPrice || 29329;
-    const step = timeframe === 'M1' ? 1 : timeframe === 'M5' ? 5 : 15;
     for (let i = 0; i < count; i++) {
       const change = (Math.random() - 0.5) * (timeframe === 'M1' ? 5 : timeframe === 'M5' ? 15 : 30);
       const open = price;
@@ -389,48 +378,6 @@ class LTFEngine {
 }
 
 // ================================
-// TELEGRAM NOTIFICATIONS (FREE)
-// ================================
-
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
-
-async function sendTelegramAlert(setup, grade) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.log('⚠️ Telegram not configured');
-    return;
-  }
-
-  const emoji = setup.direction === 'BUY' ? '🟢' : '🔴';
-  const message = `
-${emoji} *NEW SETUP DETECTED!*
-
-*${setup.direction}* at ${setup.entryPrice}
-SL: ${setup.slPrice} | TP1: ${setup.tp1Price} | TP2: ${setup.tp2Price}
-Range: ${setup.slRange} pts
-
-*Grade:* ${grade.grade} (${grade.totalScore}/9)
-*Action:* ${grade.action}
-*Zone:* ${setup.zoneType}
-*Priority:* ${setup.entryPriority}
-*MSS:* ${setup.mss}
-
-📊 Dashboard: https://nas100-trading.vercel.app
-  `;
-
-  try {
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: TELEGRAM_CHAT_ID,
-      text: message,
-      parse_mode: 'Markdown'
-    });
-    console.log('📱 Telegram alert sent!');
-  } catch (e) {
-    console.log('⚠️ Telegram failed:', e.message);
-  }
-}
-
-// ================================
 // INITIALIZE ENGINES
 // ================================
 
@@ -438,26 +385,23 @@ const htfEngine = new HTFEngine();
 const ltfEngine = new LTFEngine();
 const gradingEngine = new GradingEngine();
 
-// Run initial analysis
 htfEngine.analyze();
 
-// HTF every 4 hours
 cron.schedule('0 */4 * * *', () => htfEngine.analyze());
 
-// Price update every minute
 cron.schedule('* * * * *', async () => {
   try { const p = await fetchNAS100Price(); if (p) marketState.currentPrice = p; } catch(e) {}
   marketState.lastUpdate = Date.now();
 });
 
-// LTF monitoring every minute
 cron.schedule('* * * * *', () => {
   const setup = ltfEngine.monitor();
   if (setup) {
     const grade = gradingEngine.gradeSetup(setup, marketState);
     latestGrade = grade;
-    console.log(`📊 Grade: ${grade.grade} (${grade.totalScore}/9) — ${grade.action}`);
-    sendTelegramAlert(setup, grade);
+    const alert = `📊 ${setup.direction} | ${setup.entryPrice} | Grade: ${grade.grade} (${grade.totalScore}/9)`;
+    alertLog.push(`${new Date().toLocaleString('en-PK', {timeZone: 'Asia/Karachi'})} — ${alert}`);
+    console.log(`📊 ${alert}`);
   }
 });
 
@@ -466,9 +410,6 @@ cron.schedule('* * * * *', () => {
 // ================================
 
 app.get('/', (req, res) => {
-  const gradeDisplay = latestGrade ? 
-    `<p>Latest Grade: <strong>${latestGrade.grade}</strong> (${latestGrade.totalScore}/9)</p>` : '';
-
   const setupDisplay = latestSetup ? `
     <div class="setup-box setup-${latestSetup.direction.toLowerCase()}">
       <p><strong>${latestSetup.direction === 'BUY' ? '🟢' : '🔴'} ${latestSetup.direction}</strong> at ${latestSetup.entryPrice}</p>
@@ -502,13 +443,10 @@ app.get('/', (req, res) => {
         .setup-box { background: #1a2630; padding: 15px; border-radius: 8px; border-left: 4px solid #ff6b35; margin-top: 10px; }
         .setup-buy { border-left-color: #00ff88; }
         .setup-sell { border-left-color: #ff4466; }
-        .grade-A { color: #00ff88; }
-        .grade-B { color: #ffdd88; }
-        .grade-C { color: #ff6b35; }
-        .grade-SKIP { color: #ff4466; }
         .footer { margin-top: 20px; text-align: center; color: #8899aa; font-size: 12px; }
         .alert-log { max-height: 150px; overflow-y: auto; }
         .alert-item { padding: 6px 0; border-bottom: 1px solid #1a2630; font-size: 13px; }
+        .fcm-status { font-size: 12px; color: #8899aa; margin-top: 5px; }
         @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
       </style>
     </head>
@@ -525,6 +463,7 @@ app.get('/', (req, res) => {
             <p>H4 Structure: <strong>${marketState.h4Structure}</strong></p>
             <p>PD Arrays: <strong>${htfEngine.getTotalArrays()}</strong></p>
             <p>Last Update: <strong>${new Date(marketState.lastUpdate).toLocaleString('en-PK', {timeZone: 'Asia/Karachi'})}</strong></p>
+            <p class="fcm-status">📱 Registered Devices: ${global.fcmTokens ? global.fcmTokens.length : 0}</p>
           </div>
           <div class="card">
             <p><span class="badge ${latestSetup ? 'setup' : 'live'}">${latestSetup ? '🔔 SETUP' : '● MONITORING'}</span></p>
@@ -541,7 +480,7 @@ app.get('/', (req, res) => {
           </div>
         </div>
         <div class="footer">
-          🔄 Price updates every minute | HTF every 4 hours | LTF every minute
+          🔄 Price every minute | HTF every 4 hours | LTF every minute
           <br>📍 Discount: ${marketState.discountZone.bottom} - ${marketState.discountZone.top} | Premium: ${marketState.premiumZone.bottom} - ${marketState.premiumZone.top}
         </div>
       </div>
@@ -564,12 +503,6 @@ app.get('/api/v1/pd-arrays/:timeframe', (req, res) => {
   res.json({ success: true, data: { timeframe: tf, arrays: map[tf] || [], count: (map[tf] || []).length } });
 });
 
-app.listen(PORT, () => {
-  console.log('✅ NAS100 Trading Assistant running on port', PORT);
-  console.log('📊 HTF Engine + LTF Engine + Grading Engine active');
-});
-// Global FCM tokens store
-global.fcmTokens = [];
 // Register FCM Token Endpoint
 app.post('/api/v1/register-token', express.json(), (req, res) => {
   const { token } = req.body;
@@ -589,7 +522,10 @@ app.post('/api/v1/register-token', express.json(), (req, res) => {
     count: global.fcmTokens.length 
   });
 });
-git add index.js
-git commit -m "Added register-token endpoint"
-git push origin main
 
+app.listen(PORT, () => {
+  console.log('✅ NAS100 Trading Assistant running on port', PORT);
+});
+
+
+	

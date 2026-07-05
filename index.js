@@ -10,13 +10,22 @@ const PORT = process.env.PORT || 3000;
 // ================================
 
 try {
-  const serviceAccount = require('./firebase-key.json');
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
-  console.log('✅ Firebase Admin initialized');
+  const firebaseKey = process.env.FIREBASE_KEY;
+  if (firebaseKey) {
+    const serviceAccount = JSON.parse(firebaseKey);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log('✅ Firebase Admin initialized from env');
+  } else {
+    const serviceAccount = require('./firebase-key.json');
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log('✅ Firebase Admin initialized from file');
+  }
 } catch (e) {
-  console.log('⚠️ Firebase key not found');
+  console.log('⚠️ Firebase key not found. Phone notifications disabled.');
 }
 
 global.fcmTokens = [];
@@ -111,8 +120,7 @@ class HTFEngine {
 
   determineBias(candles) {
     const recent = candles.slice(-20);
-    let b = 0,
-      s = 0;
+    let b = 0, s = 0;
     for (let i = 1; i < recent.length; i++) {
       if (recent[i].close > recent[i - 1].close) b++;
       else s++;
@@ -124,20 +132,15 @@ class HTFEngine {
 
   analyzeStructure(candles) {
     const recent = candles.slice(-20);
-    let highs = [],
-      lows = [];
+    let highs = [], lows = [];
     for (let i = 2; i < recent.length; i++) {
-      const prev = recent[i - 1],
-        curr = recent[i],
-        next = recent[i + 1] || curr;
+      const prev = recent[i - 1], curr = recent[i], next = recent[i + 1] || curr;
       if (curr.high > prev.high && curr.high > next.high) highs.push(curr.high);
       if (curr.low < prev.low && curr.low < next.low) lows.push(curr.low);
     }
     if (highs.length < 2 || lows.length < 2) return 'RANGING';
-    const lh = highs[highs.length - 1],
-      ph = highs[highs.length - 2];
-    const ll = lows[lows.length - 1],
-      pl = lows[lows.length - 2];
+    const lh = highs[highs.length - 1], ph = highs[highs.length - 2];
+    const ll = lows[lows.length - 1], pl = lows[lows.length - 2];
     if (lh > ph && ll > pl) return 'HIGHER_HIGH';
     if (lh > ph && ll < pl) return 'HIGHER_LOW';
     if (lh < ph && ll < pl) return 'LOWER_LOW';
@@ -182,25 +185,17 @@ class GradingEngine {
   gradeSetup(setup, marketState) {
     let score = 0;
     const breakdown = {};
-    breakdown.irlErlDraw = true;
-    if (breakdown.irlErlDraw) score++;
-    breakdown.weeklyBiasClear = marketState.weeklyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH');
-    if (breakdown.weeklyBiasClear) score++;
-    breakdown.dailyBiasSame = marketState.dailyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH');
-    if (breakdown.dailyBiasSame) score++;
+    breakdown.irlErlDraw = true; if (breakdown.irlErlDraw) score++;
+    breakdown.weeklyBiasClear = marketState.weeklyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH'); if (breakdown.weeklyBiasClear) score++;
+    breakdown.dailyBiasSame = marketState.dailyBias === (setup.direction === 'BUY' ? 'BULLISH' : 'BEARISH'); if (breakdown.dailyBiasSame) score++;
     const bullishStructures = ['HIGHER_HIGH', 'HIGHER_LOW'];
     const bearishStructures = ['LOWER_LOW', 'LOWER_HIGH'];
     const validStructures = setup.direction === 'BUY' ? bullishStructures : bearishStructures;
-    breakdown.h4StructureConfirm = validStructures.includes(marketState.h4Structure);
-    if (breakdown.h4StructureConfirm) score++;
-    breakdown.premiumDiscountCorrect = (setup.direction === 'BUY' && setup.zoneType === 'DISCOUNT') || (setup.direction === 'SELL' && setup.zoneType === 'PREMIUM');
-    if (breakdown.premiumDiscountCorrect) score++;
-    breakdown.obFvgValid = true;
-    if (breakdown.obFvgValid) score++;
-    breakdown.liquiditySweep = true;
-    if (breakdown.liquiditySweep) score++;
-    breakdown.mssConfirmed = setup.mss !== undefined && setup.mss !== 'NONE';
-    if (breakdown.mssConfirmed) score++;
+    breakdown.h4StructureConfirm = validStructures.includes(marketState.h4Structure); if (breakdown.h4StructureConfirm) score++;
+    breakdown.premiumDiscountCorrect = (setup.direction === 'BUY' && setup.zoneType === 'DISCOUNT') || (setup.direction === 'SELL' && setup.zoneType === 'PREMIUM'); if (breakdown.premiumDiscountCorrect) score++;
+    breakdown.obFvgValid = true; if (breakdown.obFvgValid) score++;
+    breakdown.liquiditySweep = true; if (breakdown.liquiditySweep) score++;
+    breakdown.mssConfirmed = setup.mss !== undefined && setup.mss !== 'NONE'; if (breakdown.mssConfirmed) score++;
     breakdown.bonusMsnr = Math.random() > 0.5;
     const bonus = breakdown.bonusMsnr ? 1 : 0;
     const totalScore = score + bonus;
@@ -330,7 +325,7 @@ class LTFEngine {
 }
 
 // ================================
-// SEND PUSH NOTIFICATION TO PHONE
+// SEND PUSH NOTIFICATION
 // ================================
 
 async function sendPushNotification(setup, grade) {
